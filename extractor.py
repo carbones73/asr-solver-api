@@ -190,6 +190,14 @@ KNOWN_COLORS = [
     (255, 230, 129, "VA"),     # from PDF scan
     (248, 231, 127, "VA"),     # from PDF scan
     (232, 255, 117, "VA"),     # from PDF scan (yellow-green VA)
+    # VA — warm orange-yellow (G < 195) sampled from Jan 2026 Marc François
+    (255, 177, 40,  "VA"),     # from Jan scan — days 2-4
+    (255, 180, 43,  "VA"),     # from Jan scan — day 11
+    (255, 176, 41,  "VA"),     # from Jan scan — day 10
+    (255, 175, 40,  "VA"),     # from Jan scan — day 24
+    (254, 179, 39,  "VA"),     # from Jan scan — day 31
+    (255, 178, 38,  "VA"),     # warm orange variant
+    (253, 174, 37,  "VA"),     # warm orange variant
     # E (École ambulance) — olive / brun-vert
     (64,  90,  1,   "E"),
     (152, 157, 57,  "E"),
@@ -230,6 +238,39 @@ KNOWN_COLORS = [
 
 # Pre-sort threshold for quick white/background rejection
 _COLOR_MATCH_THRESHOLD = 65  # Increased to 65 for page-render color variance
+
+# ── Shift code sets for text-overlay extraction ─────────────────────────────
+# Codes that appear as text overlays printed directly on grid cells.
+_TEXT_OVERLAY_SHIFT_CODES = frozenset({
+    # Operational shifts
+    "6P1", "6FM", "A1", "A2", "A3", "A4",
+    "AMHR", "AMHS", "AMJ1", "AMJ2", "AMJP",
+    "AMN1", "AMN2", "AMNP",
+    "RS", "RS5", "RS6", "RS7", "RS8", "RS9", "RS10",
+    "R", "AMBCE", "CSP",
+    # Absence / overlay codes that may appear as text
+    "C", "C1", "CMHN", "VA", "E", "FO9",
+    "ML", "M", "HC", "ANP", "AP",
+    "PE", "RJ",
+})
+
+
+def _normalize_shift_code(code):
+    """Normalize variant shift codes to canonical forms used by the solver."""
+    if code in ("AMJ1", "AMJ2"):
+        return "AMJP"
+    if code in ("AMN1", "AMN2"):
+        return "AMNP"
+    if code == "AMHR":
+        return "AMHS"
+    if code.startswith("RS") and code != "RS":
+        return "RS"
+    if code == "C1":
+        return "QC1"
+    if code == "ML":
+        return "M"
+    return code
+
 
 def classify_center_pixel(r, g, b):
     """Classify a pixel RGB value to a shift code using nearest-neighbor matching."""
@@ -352,6 +393,48 @@ def process_single_pdf(pdf_path, year, month_num):
             cell_y = (bbox[1] + bbox[3]) / 2 + 5
             emp_rows.append((emp_code, cell_y))
 
+        # ── Extract text overlays (shift codes printed on cells) ──────────
+        # Text overlays are the authoritative source: "6P1", "AMJ1", etc.
+        # are printed as text directly on grid cells (often on white bg).
+        text_overlay_map = {}  # (emp_code, day) → shift_code
+
+        for s in all_spans:
+            txt = s["text"].strip()
+            if txt not in _TEXT_OVERLAY_SHIFT_CODES:
+                continue
+
+            bbox = s["bbox"]
+            span_cx = (bbox[0] + bbox[2]) / 2
+            span_cy = (bbox[1] + bbox[3]) / 2
+
+            # Must be inside the grid body (right of name column, below header)
+            if span_cx < 95 or span_cy < 100 or span_cy > 420:
+                continue
+
+            # Find closest employee row by y-position
+            closest_emp = None
+            min_emp_dist = 15  # max y-distance tolerance (points)
+            for emp_code, row_y in emp_rows:
+                dist = abs(span_cy - row_y)
+                if dist < min_emp_dist:
+                    min_emp_dist = dist
+                    closest_emp = emp_code
+
+            # Find closest day column by x-position
+            closest_day = None
+            min_day_dist = 10  # max x-distance tolerance (points)
+            for day, col_x in day_cols.items():
+                dist = abs(span_cx - col_x)
+                if dist < min_day_dist:
+                    min_day_dist = dist
+                    closest_day = day
+
+            if closest_emp and closest_day:
+                key = (closest_emp, closest_day)
+                normalized = _normalize_shift_code(txt)
+                # Text overlay always wins (most reliable source)
+                text_overlay_map[key] = normalized
+
         # ── Sample pixel color at each grid intersection ─────────────────
         for emp_code, row_y in emp_rows:
             emp_type = EMPLOYEES[emp_code]["type"]
@@ -361,34 +444,106 @@ def process_single_pdf(pdf_path, year, month_num):
                 if key in cell_map:
                     continue  # already have an entry from a previous page
 
-                # Convert page coordinates → pixel coordinates
-                px = int(col_x * ZOOM)
-                py = int(row_y * ZOOM)
+                # Priority 1: text overlay (authoritative)
+                if key in text_overlay_map:
+                    shift_code = text_overlay_map[key]
+                    # cs/sec employees don't work nights — reclassify AMNP → A1
+                    if emp_type in ("cs", "sec") and shift_code == "AMNP":
+                        shift_code = "A1"
+                    cell_map[key] = shift_code
+                    continue
 
-                # Clamp to image bounds
-                px = max(0, min(pix.width - 1, px))
-                py = max(0, min(pix.height - 1, py))
+                # Priority 2: icon histogram detection for C/C1/VA raster
+                # sun icons.  These codes don't appear as text – they're
+                # JPEG pixels in the strip images.  Detect by counting
+                # "warm" (orange/yellow) pixels across the full cell.
+                icon_detected = False
+                warm_count = 0
+                total_count = 0
+                CELL_HALF_W = 8   # ±8 pt ~ 16 pt cell width
+                CELL_HALF_H = 5   # ±5 pt ~ 10 pt cell height
+                STEP = 0.5        # sample every 0.5 pt (2× ZOOM)
 
-                # Sample center pixel
-                pixel = pix.pixel(px, py)
-                r, g, b = pixel[0], pixel[1], pixel[2]
-                shift_code = classify_center_pixel(r, g, b)
+                dx_pt = -CELL_HALF_W
+                while dx_pt <= CELL_HALF_W:
+                    dy_pt = -CELL_HALF_H
+                    while dy_pt <= CELL_HALF_H:
+                        sx = int((col_x + dx_pt) * ZOOM)
+                        sy = int((row_y + dy_pt) * ZOOM)
+                        sx = max(0, min(pix.width - 1, sx))
+                        sy = max(0, min(pix.height - 1, sy))
+                        p = pix.pixel(sx, sy)
+                        pr, pg, pb = p[0], p[1], p[2]
+                        total_count += 1
+                        # Warm = orange/yellow sun body + rays
+                        if pr > 180 and pg > 80 and pb < 120 and (pr - pb) > 80:
+                            warm_count += 1
+                        dy_pt += STEP
+                    dx_pt += STEP
 
-                # If center pixel is ambiguous, sample a 5×5 neighbourhood
-                # and pick the most common non-IGNORE classification
-                if shift_code.startswith("UNK_") or shift_code == "IGNORE":
-                    from collections import Counter
-                    votes = Counter()
-                    for dx in range(-2, 3):
-                        for dy in range(-2, 3):
-                            sx = max(0, min(pix.width - 1, px + dx))
-                            sy = max(0, min(pix.height - 1, py + dy))
-                            sp = pix.pixel(sx, sy)
-                            sc = classify_center_pixel(sp[0], sp[1], sp[2])
-                            if sc not in ("IGNORE", "UNKNOWN") and not sc.startswith("UNK_"):
-                                votes[sc] += 1
-                    if votes:
-                        shift_code = votes.most_common(1)[0][0]
+                warm_ratio = warm_count / total_count if total_count else 0
+
+                if warm_ratio > 0.10:
+                    # Sun icon detected → classify C vs C1 vs VA by
+                    # sampling corner pixels (background behind the icon)
+                    icon_detected = True
+                    corner_r, corner_g, corner_b = 0, 0, 0
+                    corner_n = 0
+                    for cdx in (-CELL_HALF_W, -CELL_HALF_W + 1):
+                        for cdy in (-CELL_HALF_H, -CELL_HALF_H + 1):
+                            cx = int((col_x + cdx) * ZOOM)
+                            cy = int((row_y + cdy) * ZOOM)
+                            cx = max(0, min(pix.width - 1, cx))
+                            cy = max(0, min(pix.height - 1, cy))
+                            cp = pix.pixel(cx, cy)
+                            brightness = (cp[0] + cp[1] + cp[2]) / 3
+                            if brightness < 240:  # skip pure white borders
+                                corner_r += cp[0]
+                                corner_g += cp[1]
+                                corner_b += cp[2]
+                                corner_n += 1
+
+                    if corner_n > 0:
+                        cr = corner_r // corner_n
+                        cg = corner_g // corner_n
+                        cb = corner_b // corner_n
+                        # VA: blue-grey background (R<160, B>150)
+                        if cr < 160 and cb > 150:
+                            shift_code = "VA"
+                        # C: bright yellow (R>230, G>230, B<50)
+                        elif cr > 230 and cg > 230 and cb < 60:
+                            shift_code = "C"
+                        else:
+                            # C1 / default congé: amber/orange background
+                            shift_code = "C1"
+                    else:
+                        shift_code = "C"  # fallback if corners are white
+
+                if not icon_detected:
+                    # Priority 3: pixel color (fallback for solid-fill cells)
+                    px = int(col_x * ZOOM)
+                    py = int(row_y * ZOOM)
+                    px = max(0, min(pix.width - 1, px))
+                    py = max(0, min(pix.height - 1, py))
+
+                    pixel = pix.pixel(px, py)
+                    r, g, b = pixel[0], pixel[1], pixel[2]
+                    shift_code = classify_center_pixel(r, g, b)
+
+                    # If center pixel is ambiguous, sample a 5×5 neighbourhood
+                    if shift_code.startswith("UNK_") or shift_code == "IGNORE":
+                        from collections import Counter
+                        votes = Counter()
+                        for dx in range(-2, 3):
+                            for dy in range(-2, 3):
+                                sx = max(0, min(pix.width - 1, px + dx))
+                                sy = max(0, min(pix.height - 1, py + dy))
+                                sp = pix.pixel(sx, sy)
+                                sc = classify_center_pixel(sp[0], sp[1], sp[2])
+                                if sc not in ("IGNORE", "UNKNOWN") and not sc.startswith("UNK_"):
+                                    votes[sc] += 1
+                        if votes:
+                            shift_code = votes.most_common(1)[0][0]
 
                 if shift_code in ("IGNORE", "UNKNOWN"):
                     continue

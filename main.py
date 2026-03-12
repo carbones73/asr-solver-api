@@ -376,41 +376,68 @@ def _do_solve(target_year: int, target_month: int) -> dict:
                             model.Add(X[(eid_student, d, s)] == X[(ref_id, d, s)])
 
     # C7: Weekly 50h LTr limit (config-driven, proportional to FTE)
+    # Pre-compute imported minutes per (employee, week) to avoid infeasibility
+    # when imports already exceed the weekly budget.
     weeks = defaultdict(list)
     for d in days_range:
         iso = get_date(d).isocalendar()
         weeks[(iso[0], iso[1])].append(d)
 
+    imported_week_minutes = defaultdict(int)  # (emp_id, year, week) -> fixed minutes
+    for (eid, d), s_code in manual_map.items():
+        if s_code in shift_by_code:
+            dur = shift_by_code[s_code].get("gross_minutes") or 0
+            if dur > 0:
+                iso = get_date(d).isocalendar()
+                imported_week_minutes[(eid, iso[0], iso[1])] += dur
+
     for week_key, days_in_week in weeks.items():
         for e in emp_ids:
             fte = emp_by_id[e].get('fte_percent') or 100
             limit = int(max_week_minutes * fte / 100)
+            fixed_minutes = imported_week_minutes.get((e, week_key[0], week_key[1]), 0)
+            remaining_budget = max(0, limit - fixed_minutes)
+            # Only sum solver-free days (days without import/manual entry)
+            solver_days = [d for d in days_in_week if (e, d) not in manual_map]
             week_min = []
-            for d in days_in_week:
+            for d in solver_days:
                 for s in shift_codes:
                     if s != "REPOS" and s in shift_by_code:
                         dur = shift_by_code[s].get("gross_minutes") or 0
                         if dur > 0:
                             week_min.append(X[(e, d, s)] * dur)
             if week_min:
-                model.Add(sum(week_min) <= limit)
+                model.Add(sum(week_min) <= remaining_budget)
 
     # C8: Monthly limit (contract + overshoot %)
+    # Pre-compute imported minutes per employee to avoid infeasibility
+    # when imports already exceed the monthly budget.
+    imported_month_minutes = defaultdict(int)  # emp_id -> fixed minutes this month
+    for (eid, d), s_code in manual_map.items():
+        if s_code in shift_by_code:
+            dur = shift_by_code[s_code].get("gross_minutes") or 0
+            if dur > 0:
+                imported_month_minutes[eid] += dur
+
     for e in employees:
         eid = e['id']
         fte = e.get('fte_percent', 100) or 100
         monthly_contract_min = 10400 * (fte / 100.0)
         monthly_limit = int(monthly_contract_min * (1 + max_month_overshoot_pct / 100))
+        fixed_minutes = imported_month_minutes.get(eid, 0)
+        remaining_budget = max(0, monthly_limit - fixed_minutes)
 
+        # Only sum solver-free days (days without import/manual entry)
+        solver_days = [d for d in days_range if (eid, d) not in manual_map]
         month_min = []
-        for d in days_range:
+        for d in solver_days:
             for s in shift_codes:
                 if s != "REPOS" and s in shift_by_code:
                     dur = shift_by_code[s].get("gross_minutes") or 0
                     if dur > 0:
                         month_min.append(X[(eid, d, s)] * dur)
         if month_min:
-            model.Add(sum(month_min) <= monthly_limit)
+            model.Add(sum(month_min) <= remaining_budget)
 
     # C9: Daily coverage requirements (config-driven)
     vaud_holidays = get_vaud_holidays(target_year)
@@ -433,12 +460,27 @@ def _do_solve(target_year: int, target_month: int) -> dict:
         locked_out = sum(1 for e in emp_ids if manual_map.get((e, d)) in absence_codes)
         available_pool = len(emp_ids) - locked_out
 
+        # Count employees already pre-assigned to each shift via import/manual
+        pre_assigned_count = {}
+        for s_code in needs:
+            pre_assigned_count[s_code] = sum(
+                1 for e in emp_ids if manual_map.get((e, d)) == s_code
+            )
+
+        # Only constrain solver-assignable employees (exclude those with manual entries)
+        solver_emp_ids = [e for e in emp_ids if (e, d) not in manual_map]
+
         for s_code, required in needs.items():
             if s_code not in shift_codes or required == 0:
                 continue
-            cap = min(required, max(0, available_pool - required))
-            model.Add(sum(X[(e, d, s_code)] for e in emp_ids) >= cap)
-            model.Add(sum(X[(e, d, s_code)] for e in emp_ids) <= required)
+            already = pre_assigned_count.get(s_code, 0)
+            remaining_need = max(0, required - already)
+            # Cap remaining need by available solver pool
+            cap = min(remaining_need, len(solver_emp_ids))
+            if cap > 0:
+                model.Add(sum(X[(e, d, s_code)] for e in solver_emp_ids) >= cap)
+            # Upper bound: don't exceed the total required (minus already assigned)
+            model.Add(sum(X[(e, d, s_code)] for e in solver_emp_ids) <= remaining_need)
 
     # C10: SD (technicien) caps per shift type per day
     sd_emp_ids = [e['id'] for e in employees if e['activity_type'] == 'ta']
@@ -919,39 +961,59 @@ def _do_explain(target_year: int, target_month: int) -> dict:
                     for s in ["AMJP", "AMNP", "AMHS", "R"]:
                         if s in shift_codes:
                             model.Add(X[(eid_student, d, s)] == X[(ref_id, d, s)])
-    # C7
+    # C7 (import-aware weekly limit)
+    imported_week_minutes = defaultdict(int)  # (emp_id, week_key) -> fixed minutes
     weeks = defaultdict(list)
     for d in days_range:
         iso = get_date(d).isocalendar()
-        weeks[(iso[0], iso[1])].append(d)
+        week_key = (iso[0], iso[1])
+        weeks[week_key].append(d)
+    for (eid, d), s_code in manual_map.items():
+        if s_code in shift_by_code:
+            dur = shift_by_code[s_code].get("gross_minutes") or 0
+            if dur > 0:
+                iso = get_date(d).isocalendar()
+                imported_week_minutes[(eid, (iso[0], iso[1]))] += dur
     for week_key, days_in_week in weeks.items():
         for e in emp_ids:
             fte = emp_by_id[e].get('fte_percent') or 100
             limit = int(max_week_minutes * fte / 100)
+            fixed = imported_week_minutes.get((e, week_key), 0)
+            remaining_budget = max(0, limit - fixed)
+            solver_days = [d for d in days_in_week if (e, d) not in manual_map]
             week_min = []
-            for d in days_in_week:
+            for d in solver_days:
                 for s in shift_codes:
                     if s != "REPOS" and s in shift_by_code:
                         dur = shift_by_code[s].get("gross_minutes") or 0
                         if dur > 0:
                             week_min.append(X[(e, d, s)] * dur)
             if week_min:
-                model.Add(sum(week_min) <= limit)
-    # C8
+                model.Add(sum(week_min) <= remaining_budget)
+    # C8 (import-aware monthly limit)
+    imported_month_minutes = defaultdict(int)
+    for (eid, d), s_code in manual_map.items():
+        if s_code in shift_by_code:
+            dur = shift_by_code[s_code].get("gross_minutes") or 0
+            if dur > 0:
+                imported_month_minutes[eid] += dur
     for e in employees:
         eid = e['id']
         fte = e.get('fte_percent', 100) or 100
         monthly_contract_min = 10400 * (fte / 100.0)
         monthly_limit = int(monthly_contract_min * (1 + max_month_overshoot_pct / 100))
+        fixed_minutes = imported_month_minutes.get(eid, 0)
+        remaining_budget = max(0, monthly_limit - fixed_minutes)
+        solver_days = [d for d in days_range if (eid, d) not in manual_map]
         month_min = []
-        for d in days_range:
+        for d in solver_days:
             for s in shift_codes:
                 if s != "REPOS" and s in shift_by_code:
                     dur = shift_by_code[s].get("gross_minutes") or 0
                     if dur > 0:
                         month_min.append(X[(eid, d, s)] * dur)
         if month_min:
-            model.Add(sum(month_min) <= monthly_limit)
+            model.Add(sum(month_min) <= remaining_budget)
     # C9
     for d in days_range:
         dd = get_date(d)
