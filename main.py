@@ -1698,6 +1698,7 @@ async def upload_pdf_confirm(token: str = Form(...), user_id: str = Form(None)):
 
             supabase.table("schedule_entries").upsert(payload, on_conflict="personnel_id,entry_date").execute()
         except Exception as e:
+            logger.error(f"Upsert failed: {e}")
             entries_failed = len(payload)
             entries_new = 0
             entries_updated = 0

@@ -242,3 +242,154 @@ class TestSolverConstraints:
             assert amnp_count >= 2, (
                 f"Only {amnp_count} AMNP on {d} — need at least 2"
             )
+
+
+class TestExplainEndpoint:
+    """Test the /explain diagnostic endpoint (Feature 2)."""
+
+    @pytest.fixture(autouse=True, scope="class")
+    def explain_result(self, client: httpx.Client):
+        """Run /explain on test month — read-only, no cleanup needed."""
+        r = client.post("/explain", json={"year": TEST_YEAR, "month": TEST_MONTH})
+        assert r.status_code == 200
+        self.__class__._explain_data = r.json()
+        yield self.__class__._explain_data
+
+    @property
+    def _data(self):
+        return self.__class__._explain_data
+
+    def test_explain_returns_status(self):
+        assert self._data["status"] in ("success", "error")
+
+    def test_explain_has_feasibility_flag(self):
+        if self._data["status"] != "success":
+            pytest.skip("Explain endpoint returned error")
+        assert "feasible" in self._data
+
+    def test_explain_contains_diagnostics(self):
+        if self._data["status"] != "success":
+            pytest.skip("Explain endpoint returned error")
+        diags = self._data.get("diagnostics", [])
+        assert isinstance(diags, list)
+        assert len(diags) > 0, "Expected at least one diagnostic entry"
+
+    def test_diagnostics_have_required_keys(self):
+        if self._data["status"] != "success":
+            pytest.skip("Explain endpoint returned error")
+        for diag in self._data["diagnostics"]:
+            for key in ("constraint", "status", "detail"):
+                assert key in diag, f"Diagnostic missing key: {key}"
+            assert diag["status"] in (
+                "ok", "warning", "critical"
+            ), f"Unexpected diagnostic status: {diag['status']}"
+
+
+class TestEquityDistribution:
+    """Validate the equity soft-constraint (P2) distributes shifts fairly."""
+
+    @pytest.fixture(autouse=True, scope="class")
+    def solve_result(self, client: httpx.Client):
+        client.post("/clear", json={"year": TEST_YEAR, "month": TEST_MONTH})
+        r = client.post("/solve", json={"year": TEST_YEAR, "month": TEST_MONTH})
+        assert r.status_code == 200
+        self.__class__._solve_data = r.json()
+        yield self.__class__._solve_data
+        client.post("/clear", json={"year": TEST_YEAR, "month": TEST_MONTH})
+
+    @property
+    def _data(self):
+        return self.__class__._solve_data
+
+    def test_operational_shifts_not_concentrated(self):
+        """No single employee should have >50% of all AMJP+AMNP+AMHS shifts."""
+        if self._data["status"] != "success":
+            pytest.skip("Solver did not find a feasible solution")
+
+        schedule = self._data["schedule"]
+        entries = _entries_from_schedule(schedule)
+        op_codes = {"AMJP", "AMNP", "AMHS"}
+        op_entries = [e for e in entries if e["shift"] in op_codes]
+
+        if not op_entries:
+            pytest.skip("No operational shift entries found")
+
+        emp_op: Dict[str, int] = defaultdict(int)
+        for e in op_entries:
+            emp_op[e["id"]] += 1
+
+        total_ops = sum(emp_op.values())
+        for emp_id, count in emp_op.items():
+            assert count <= total_ops * 0.5, (
+                f"Employee {emp_id} has {count}/{total_ops} operational shifts "
+                f"({count/total_ops*100:.0f}%) — exceeds 50% concentration limit"
+            )
+
+    def test_night_distribution_reasonably_balanced(self):
+        """Night shifts shouldn't all go to one person — CV ≤ 1.0."""
+        if self._data["status"] != "success":
+            pytest.skip("Solver did not find a feasible solution")
+
+        schedule = self._data["schedule"]
+        entries = _entries_from_schedule(schedule)
+        night_entries = [e for e in entries if e["shift"] == "AMNP"]
+        if not night_entries:
+            pytest.skip("No night shifts in schedule")
+
+        emp_nights: Dict[str, int] = defaultdict(int)
+        for e in night_entries:
+            emp_nights[e["id"]] += 1
+
+        if len(emp_nights) < 3:
+            pytest.skip("Fewer than 3 employees do nights — too few for dispersion check")
+
+        values = list(emp_nights.values())
+        mean = sum(values) / len(values)
+        variance = sum((v - mean) ** 2 for v in values) / len(values)
+        std_dev = variance ** 0.5
+        cv = std_dev / mean if mean > 0 else 0.0
+
+        assert cv <= 1.0, (
+            f"Night distribution too uneven: CV={cv:.2f} "
+            f"(mean={mean:.1f}, std={std_dev:.1f}, counts={sorted(values)})"
+        )
+
+
+class TestCmhnRecovery:
+    """Validate C13: employees with ≥3 nights or high CMHN balance get a CMHN day."""
+
+    @pytest.fixture(autouse=True, scope="class")
+    def solve_result(self, client: httpx.Client):
+        client.post("/clear", json={"year": TEST_YEAR, "month": TEST_MONTH})
+        r = client.post("/solve", json={"year": TEST_YEAR, "month": TEST_MONTH})
+        assert r.status_code == 200
+        self.__class__._solve_data = r.json()
+        yield self.__class__._solve_data
+        client.post("/clear", json={"year": TEST_YEAR, "month": TEST_MONTH})
+
+    @property
+    def _data(self):
+        return self.__class__._solve_data
+
+    def test_heavy_night_workers_get_cmhn(self):
+        """Employees with ≥3 AMNP shifts should have at least 1 CMHN day."""
+        if self._data["status"] != "success":
+            pytest.skip("Solver did not find a feasible solution")
+
+        schedule = self._data["schedule"]
+        entries = _entries_from_schedule(schedule)
+
+        emp_nights: Dict[str, int] = defaultdict(int)
+        emp_cmhn: Dict[str, int] = defaultdict(int)
+        for e in entries:
+            if e["shift"] == "AMNP":
+                emp_nights[e["id"]] += 1
+            elif e["shift"] == "CMHN":
+                emp_cmhn[e["id"]] += 1
+
+        heavy_workers = {eid for eid, n in emp_nights.items() if n >= 3}
+        for eid in heavy_workers:
+            assert emp_cmhn.get(eid, 0) >= 1, (
+                f"Employee {eid} has {emp_nights[eid]} AMNP shifts but 0 CMHN — "
+                f"violates C13 recovery rule"
+            )

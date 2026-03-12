@@ -48,9 +48,52 @@ EMPLOYEES = {
 # ── Known PDF colors: (R, G, B, shift_code) ────────────────────────────────
 # Each entry is a color observed in the ASR planning PDFs.
 # classify_center_pixel() finds the nearest match by Euclidean distance.
-# Last calibrated: 2026-03-09 from scan of 6 PDFs (Jan–Jun 2026)
+# Last calibrated: 2026-03-12 from scan of 6 PDFs (Jan–Jun 2026)
+#
+# ══ Official PDF Legend (from page footers) ═══════════════════════════════
+# FONCTIONS (turni operativi):
+#   6P1     = C6 Flexible jour complet   07:00-11:00 / 13:30-17:30
+#   A1      = Administratif              17:00-19:15
+#   A2      = Administratif              08:00-16:00
+#   A3      = Administratif              13:00-23:00
+#   A4      = Administratif              13:00-23:40
+#   AMHR    = C6 Horaire R               08:55-16:55
+#   AMHS    = C6 Horaire S               09:55-19:55
+#   AMJ1    = C6 Jour 1                  06:30-18:40
+#   AMJ2    = C6 Jour 2                  06:30-18:40
+#   AMJP    = C6 Jour Planifié           06:30-18:40
+#   AMN1    = C6 Nuit 1                  18:40-06:30
+#   AMN2    = C6 Nuit 2                  18:40-06:30
+#   RS5–RS10 = Rapid Spécial (varianti)  vari orari
+#
+# ABSENCES:
+#   C       = Congé, repos
+#   C1      = Congé prioritaire, repos   → mapped to QC1
+#   CMHN    = Compensation majoration nuit
+#   E       = Ecole (ambulance)
+#   FO9     = Formation, cours (9h)
+#   ML      = Maladie non prof.          → mapped to M
+#   VA      = Vacances
+#   HC      = Heures compensées (soldes heures)
+#   ANP     = Accident non-professionnel
+#   AMBCE   = Ambulances CE
+#
+# MARQUAGES (overlay, non turni):
+#   PE      = C6 - Permutation effectuée ✅ (magenta overlay)
+#   RJ      = C6 - Responsable du jour   (overlay)
+#
+# PIXEL-BASED CODE MAPPING NOTES:
+#   - AMJ1/AMJ2 share same color as AMJP → all mapped to "AMJP"
+#   - AMN1/AMN2 share same color as AMNP → all mapped to "AMNP"
+#   - RS5–RS10 share same orange color  → all mapped to "RS"
+#   - AMHR similar lilac as AMHS        → mapped to "AMHS"
+#   - ML (new legend code) = M          → mapped to "M"
+#   - C1 (new legend code)              → mapped to "QC1"
+#   - PE/RJ are marquages, not shift replacements
+# ══════════════════════════════════════════════════════════════════════════
 KNOWN_COLORS = [
-    # AMNP (Nuit) — dark blue / near-black
+    # ── FONCTIONS (turni operativi) ─────────────────────────────────────
+    # AMNP / AMN1 / AMN2 (C6 Nuit) — dark blue / near-black
     (51,  54,  99,  "AMNP"),
     (4,   4,   14,  "AMNP"),
     (0,   5,   19,  "AMNP"),
@@ -59,7 +102,7 @@ KNOWN_COLORS = [
     (0,   0,   10,  "AMNP"),
     (5,   5,   20,  "AMNP"),
     (71,  58,  140, "AMNP"),   # from Feb/Mar PDFs — purple-tint night
-    # AMJP (Jour) — cyan / teal / bleu-vert
+    # AMJP / AMJ1 / AMJ2 (C6 Jour) — cyan / teal / bleu-vert
     (88,  157, 232, "AMJP"),
     (75,  157, 230, "AMJP"),
     (0,   82,  68,  "AMJP"),
@@ -68,7 +111,11 @@ KNOWN_COLORS = [
     (20,  70,  60,  "AMJP"),
     (70,  226, 255, "AMJP"),   # bright cyan — 148 placements across PDFs
     (0,   149, 144, "AMJP"),   # dark teal variant
-    # AMHS (Horaire S) — mauve / lilas / violet pâle
+    (0,   255, 255, "AMJP"),   # pure aqua (page-render artefact)
+    (20,  250, 250, "AMJP"),   # bright aqua variant
+    (10,  248, 248, "AMJP"),   # bright aqua variant
+    (0,   250, 240, "AMJP"),   # teal-aqua variant
+    # AMHS / AMHR (C6 Horaire S/R) — mauve / lilas / violet pâle
     (214, 187, 215, "AMHS"),
     (186, 156, 211, "AMHS"),
     (204, 204, 255, "AMHS"),
@@ -79,10 +126,55 @@ KNOWN_COLORS = [
     (252, 33,  0,   "R"),      # bright red — 68 placements
     (240, 30,  0,   "R"),
     (255, 40,  10,  "R"),
-    # RS (Renfort Spécial) — orange vif
+    # RS / RS5–RS10 (Rapid Spécial) — orange vif
     (255, 127, 0,   "RS"),     # bright orange — 68 placements
     (255, 120, 0,   "RS"),
-    # CMHN (Compensation nuit) — jaune vif
+    # 6P1 (C6 Flexible jour complet) — gris moyen
+    (170, 170, 170, "6P1"),
+    (155, 155, 155, "6P1"),
+    # 6FM (Flexible matin) — gris clair
+    (210, 210, 210, "6FM"),
+    (195, 195, 195, "6FM"),
+    (176, 196, 194, "6FM"),    # from PDF scan (blue-tint grey)
+    (170, 194, 204, "6FM"),    # from PDF scan (blue-tint grey)
+    (200, 255, 214, "6FM"),    # from PDF scan (light green-grey)
+    # A1 (Administratif) — gris très foncé
+    (70,  70,  70,  "A1"),
+    (55,  55,  55,  "A1"),
+    # A2 (Administratif 08:00-16:00) — gris foncé
+    (120, 120, 120, "A2"),
+    (105, 105, 105, "A2"),
+    (93,  107, 146, "A2"),     # from PDF scan (blue-tint grey)
+    # A3 (Administratif 13:00-23:00) — gris bleuté (estimated, rare)
+    (85,  90,  110, "A3"),
+    # A4 (Administratif 13:00-23:40) — gris bleuté foncé (estimated, rare)
+    (75,  80,  100, "A4"),
+    # AMBCE (Ambulances CE) — same tones as AMJP (estimated)
+    # NOTE: AMBCE may appear as text overlay on a distinct background
+    #       — if seen, will need recalibration
+
+    # ── ABSENCES ─────────────────────────────────────────────────────────
+    # C (Congé, repos) — vert
+    (0,   128, 0,   "C"),
+    (0,   100, 0,   "C"),
+    (30,  140, 30,  "C"),
+    (154, 255, 182, "C"),      # light green — 6 placements
+    (121, 255, 185, "C"),      # mint green — 1 placement
+    (150, 255, 206, "C"),      # pale mint — 3 placements
+    (106, 250, 102, "C"),      # bright lime-green (congé variant)
+    # QC1 / C1 (Congé prioritaire) — orange brun
+    (190, 145, 77,  "QC1"),
+    (198, 149, 80,  "QC1"),
+    (188, 143, 74,  "QC1"),
+    (175, 130, 60,  "QC1"),
+    (191, 140, 70,  "QC1"),
+    (180, 135, 65,  "QC1"),
+    (200, 155, 85,  "QC1"),
+    (165, 120, 55,  "QC1"),
+    (225, 116, 83,  "QC1"),    # from PDF scan (orange-red QC1)
+    (218, 109, 70,  "QC1"),    # from PDF scan
+    (194, 154, 103, "QC1"),    # from PDF scan (tan/sandy QC1)
+    # CMHN (Compensation majoration nuit) — jaune vif
     (222, 207, 52,  "CMHN"),
     (230, 200, 40,  "CMHN"),
     (255, 230, 50,  "CMHN"),
@@ -98,17 +190,19 @@ KNOWN_COLORS = [
     (255, 230, 129, "VA"),     # from PDF scan
     (248, 231, 127, "VA"),     # from PDF scan
     (232, 255, 117, "VA"),     # from PDF scan (yellow-green VA)
-    # E (École) — olive / brun-vert
+    # E (École ambulance) — olive / brun-vert
     (64,  90,  1,   "E"),
     (152, 157, 57,  "E"),
     (180, 192, 0,   "E"),
     (125, 139, 25,  "E"),
     (100, 120, 30,  "E"),
     (93,  221, 50,  "E"),      # bright green — école variant
-    # FO9 (Formation) — violet / pourpre
+    (4,   255, 3,   "E"),      # pure bright green (école)
+    (1,   245, 2,   "E"),      # bright lime-green (école)
+    # FO9 (Formation, cours 9h) — violet / pourpre
     (160, 120, 200, "FO9"),
     (147, 112, 219, "FO9"),
-    # M (Maladie) — rouge foncé
+    # M / ML (Maladie non prof.) — rouge foncé
     (112, 6,   6,   "M"),
     (138, 0,   0,   "M"),
     (34,  0,   0,   "M"),
@@ -121,45 +215,21 @@ KNOWN_COLORS = [
     (195, 85,  58,  "ANP"),    # from PDF scan
     (204, 95,  62,  "ANP"),    # from PDF scan
     (210, 100, 67,  "ANP"),    # from PDF scan
-    # AP (Accident professionnel) — rose/saumon
+    # AP (Accident professionnel — not in legend, kept for old PDFs) — rose/saumon
     (255, 187, 172, "AP"),     # salmon pink — 6 placements
     (255, 180, 165, "AP"),
-    # QC1 (Picchetto chef) — orange brun
-    (190, 145, 77,  "QC1"),
-    (198, 149, 80,  "QC1"),
-    (188, 143, 74,  "QC1"),
-    (175, 130, 60,  "QC1"),
-    (191, 140, 70,  "QC1"),
-    (180, 135, 65,  "QC1"),
-    (200, 155, 85,  "QC1"),
-    (165, 120, 55,  "QC1"),
-    (225, 116, 83,  "QC1"),    # from PDF scan (orange-red QC1)
-    (218, 109, 70,  "QC1"),    # from PDF scan
-    (194, 154, 103, "QC1"),    # from PDF scan (tan/sandy QC1)
-    # C (Congé / Repos) — vert
-    (0,   128, 0,   "C"),
-    (0,   100, 0,   "C"),
-    (30,  140, 30,  "C"),
-    (154, 255, 182, "C"),      # light green — 6 placements
-    (121, 255, 185, "C"),      # mint green — 1 placement
-    (150, 255, 206, "C"),      # pale mint — 3 placements
-    # Admin greys
-    (210, 210, 210, "6FM"),    # Gris clair
-    (195, 195, 195, "6FM"),
-    (176, 196, 194, "6FM"),    # from PDF scan (blue-tint grey)
-    (170, 194, 204, "6FM"),    # from PDF scan (blue-tint grey)
-    (200, 255, 214, "6FM"),    # from PDF scan (light green-grey)
-    (170, 170, 170, "6P1"),    # Gris moyen
-    (155, 155, 155, "6P1"),
-    (120, 120, 120, "A2"),     # Gris foncé
-    (105, 105, 105, "A2"),
-    (93,  107, 146, "A2"),     # from PDF scan (blue-tint grey)
-    (70,  70,  70,  "A1"),     # Gris très foncé
-    (55,  55,  55,  "A1"),
+    # HC (Heures compensées / soldes heures) — vert pâle (estimated, rare)
+    # NOTE: HC may share green tones with C — needs calibration if seen
+
+    # ── MARQUAGES (overlay, non pas des turni) ──────────────────────────
+    # PE (C6 - Permutation effectuée ✅) — magenta / fuchsia
+    (129, 0,   127, "PE"),      # deep magenta — Curty Doris Jan 2026
+    # RJ (C6 - Responsable du jour) — no distinct color observed yet
+    # NOTE: RJ is typically a text overlay, not a cell background color
 ]
 
 # Pre-sort threshold for quick white/background rejection
-_COLOR_MATCH_THRESHOLD = 55  # Increased to 55 for broader matching
+_COLOR_MATCH_THRESHOLD = 65  # Increased to 65 for page-render color variance
 
 def classify_center_pixel(r, g, b):
     """Classify a pixel RGB value to a shift code using nearest-neighbor matching."""
@@ -192,118 +262,157 @@ def classify_center_pixel(r, g, b):
 
 
 def process_single_pdf(pdf_path, year, month_num):
+    """Extract shift entries from an ASR planning PDF using page-render pixel sampling.
+
+    The PDF consists of multiple pages, each containing a grid of colored cells
+    (baked into large background strip images). Employee names appear as text in
+    the left column, and day numbers appear as text in the header row.
+
+    Strategy:
+    1. Iterate over ALL pages.
+    2. Map employee names (text) → hierarchy codes via the EMPLOYEES dict.
+    3. Identify day column x-positions from header text.
+    4. Render each page at high DPI and sample the pixel color at each
+       (employee-row, day-column) grid intersection.
+    5. Classify each sampled color to a shift code.
+    """
     doc = pymupdf.open(pdf_path)
-    page = doc[0]
-    
-    dict_blocks = page.get_text("dict")["blocks"]
-    text_blocks = [b for b in dict_blocks if b["type"] == 0]
-    
-    emp_rows = {}
-    day_cols = {}
-    
-    # Base tolerances
-    y_tol = 15
-    x_tol = 18
-    
-    for b in text_blocks:
-        for l in b["lines"]:
-            for s in l["spans"]:
-                txt = s["text"].strip()
-                bbox = s["bbox"]
-                cx = (bbox[0] + bbox[2]) / 2
-                cy = (bbox[1] + bbox[3]) / 2
-                
-                # Identify employee codes "00" to "39"
-                if len(txt) == 2 and txt.isdigit():
-                    if 0 <= int(txt) <= 39:
-                        emp_rows[txt] = {"y": cy, "bbox": bbox}
-                
-                # Identify day numbers "1" up to "31"
-                if txt.isdigit():
-                    val = int(txt)
-                    if 1 <= val <= 31 and cy < 150:
-                        if val not in day_cols:
-                            day_cols[val] = {"x": cx, "bbox": bbox}
-                        else:
-                            if abs(cy - 120) < abs(day_cols[val]["y"] - 120 if "y" in day_cols[val] else 999):
-                                day_cols[val] = {"x": cx, "y": cy, "bbox": bbox}
 
-    img_cache = {}
-    for item in page.get_images():
-        xref = item[0]
-        pix = pymupdf.Pixmap(doc, xref)
-        if pix.n - pix.alpha < 3:
-            pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
-        
-        w, h = pix.width, pix.height
-        cx, cy = w // 2, h // 2
-        try:
-            pixel = pix.pixel(cx, cy)
-            r, g, b = pixel[0], pixel[1], pixel[2]
-            shift_code = classify_center_pixel(r, g, b)
-            img_cache[xref] = {"code": shift_code, "rgb": (r, g, b)}
-        except Exception:
-            img_cache[xref] = {"code": "UNKNOWN", "rgb": (0,0,0)}
+    # Build reverse lookup: employee name → hierarchy code
+    _name_to_code = {}
+    for code, info in EMPLOYEES.items():
+        _name_to_code[info["name"]] = code
 
-    cell_map = {}
-    for xref in img_cache.keys():
-        rects = page.get_image_rects(xref)
-        for rect in rects:
-            img_cy = (rect.y0 + rect.y1) / 2
-            
-            best_emp = None
-            best_emp_dist = float('inf')
-            for code, info in emp_rows.items():
-                dist = abs(img_cy - info["y"])
-                if dist < best_emp_dist:
-                    best_emp_dist = dist
-                    best_emp = code
-            
-            if best_emp and best_emp_dist < y_tol:
-                original_shift_code = img_cache[xref]["code"]
-                
-                if original_shift_code == "IGNORE" or original_shift_code.startswith("UNK"):
-                    continue
-                    
-                emp_type = EMPLOYEES[best_emp]["type"]
-                if emp_type in ("cs", "sec") and original_shift_code == "AMNP":
-                    original_shift_code = "A1"
-                    
-                # Support multi-day blocks by checking if the day's column center is within the rectangle's x boundaries
-                for day, info in day_cols.items():
-                    day_x = info["x"]
-                    if (rect.x0 - 5) <= day_x <= (rect.x1 + 5):
-                        shift_code = original_shift_code
+    # Names that should NOT be treated as employee names
+    _SKIP_TEXTS = frozenset({
+        "ad", "ta", "cs", "sec", "aux", "", "RS",
+        "Fonctions:", "Absences:", "Marquages:",
+    })
 
-                        key = (best_emp, day)
-                        # We use distance 0 because if it's within bounds, it's an exact hit
-                        if key not in cell_map:
-                            cell_map[key] = {
-                                "shift_code": shift_code,
-                                "dist": best_emp_dist,
-                            }
-                    
-    doc.close()
-    
-    entries = []
-    # Import ALL recognized shift codes from the PDF so the dashboard
-    # mirrors the PDF exactly. Previously only absence codes were imported,
-    # causing a mismatch between PDF and dashboard display.
-    ignored_prefixes = ("UNK_", "IGNORE", "UNKNOWN")
-
-    # Collect unknown colors for debugging / calibration
+    ZOOM = 4.0  # ~288 DPI — good balance of accuracy vs memory
+    cell_map = {}  # (hierarchy_code, day) → shift_code
     unk_colors_found = {}
-    for (emp_code, day), info in sorted(cell_map.items()):
-        code = info["shift_code"]
-        if any(code.startswith(p) for p in ignored_prefixes):
-            if code.startswith("UNK_"):
-                unk_colors_found[code] = unk_colors_found.get(code, 0) + 1
-            continue
+
+    for page_idx in range(len(doc)):
+        page = doc[page_idx]
+
+        # ── Render the page as a high-resolution pixmap ──────────────────
+        mat = pymupdf.Matrix(ZOOM, ZOOM)
+        pix = page.get_pixmap(matrix=mat)
+
+        # ── Extract text spans ───────────────────────────────────────────
+        dict_blocks = page.get_text("dict")["blocks"]
+        all_spans = []
+        for b in dict_blocks:
+            if b["type"] != 0:
+                continue
+            for l in b["lines"]:
+                for s in l["spans"]:
+                    all_spans.append(s)
+
+        # ── Find day-column x-positions from header text ─────────────────
+        # Day numbers ("1.", "2.", … "31.") appear in the header area (y ~ 85-100)
+        day_cols = {}
+        for s in all_spans:
+            txt = s["text"].strip().rstrip(".")
+            bbox = s["bbox"]
+            cy = (bbox[1] + bbox[3]) / 2
+            if txt.isdigit() and 1 <= int(txt) <= 31 and 70 < cy < 100:
+                day_num = int(txt)
+                cx = (bbox[0] + bbox[2]) / 2
+                if day_num not in day_cols:
+                    day_cols[day_num] = cx
+
+        if not day_cols:
+            continue  # page has no grid header; skip
+
+        # ── Find employee-row y-positions from left-column name text ─────
+        emp_rows = []  # list of (hierarchy_code, cell_center_y)
+        for s in all_spans:
+            txt = s["text"].strip()
+            bbox = s["bbox"]
+
+            # Left column, within the grid area (below header, above footer)
+            if bbox[0] >= 95 or bbox[1] <= 100 or bbox[1] >= 420:
+                continue
+            if txt in _SKIP_TEXTS:
+                continue
+            # Skip percentage strings like "80%", star annotations, and short tokens
+            if txt.endswith("%") or txt.endswith("*") or len(txt) <= 3:
+                continue
+            # Skip known non-name patterns
+            if any(txt.startswith(p) for p in ("AM", "6P", "6F", "C1", "FO", "PE", "Date", "RS")):
+                continue
+
+            emp_code = _name_to_code.get(txt)
+            if emp_code is None:
+                continue
+
+            # The colored cell center is a few points below the name baseline
+            cell_y = (bbox[1] + bbox[3]) / 2 + 5
+            emp_rows.append((emp_code, cell_y))
+
+        # ── Sample pixel color at each grid intersection ─────────────────
+        for emp_code, row_y in emp_rows:
+            emp_type = EMPLOYEES[emp_code]["type"]
+
+            for day, col_x in day_cols.items():
+                key = (emp_code, day)
+                if key in cell_map:
+                    continue  # already have an entry from a previous page
+
+                # Convert page coordinates → pixel coordinates
+                px = int(col_x * ZOOM)
+                py = int(row_y * ZOOM)
+
+                # Clamp to image bounds
+                px = max(0, min(pix.width - 1, px))
+                py = max(0, min(pix.height - 1, py))
+
+                # Sample center pixel
+                pixel = pix.pixel(px, py)
+                r, g, b = pixel[0], pixel[1], pixel[2]
+                shift_code = classify_center_pixel(r, g, b)
+
+                # If center pixel is ambiguous, sample a 5×5 neighbourhood
+                # and pick the most common non-IGNORE classification
+                if shift_code.startswith("UNK_") or shift_code == "IGNORE":
+                    from collections import Counter
+                    votes = Counter()
+                    for dx in range(-2, 3):
+                        for dy in range(-2, 3):
+                            sx = max(0, min(pix.width - 1, px + dx))
+                            sy = max(0, min(pix.height - 1, py + dy))
+                            sp = pix.pixel(sx, sy)
+                            sc = classify_center_pixel(sp[0], sp[1], sp[2])
+                            if sc not in ("IGNORE", "UNKNOWN") and not sc.startswith("UNK_"):
+                                votes[sc] += 1
+                    if votes:
+                        shift_code = votes.most_common(1)[0][0]
+
+                if shift_code in ("IGNORE", "UNKNOWN"):
+                    continue
+
+                if shift_code.startswith("UNK_"):
+                    unk_colors_found[shift_code] = unk_colors_found.get(shift_code, 0) + 1
+                    continue
+
+                # cs/sec employees don't work nights — reclassify AMNP → A1
+                if emp_type in ("cs", "sec") and shift_code == "AMNP":
+                    shift_code = "A1"
+
+                cell_map[key] = shift_code
+
+    doc.close()
+
+    # ── Build output entries ─────────────────────────────────────────────
+    entries = []
+    for (emp_code, day), shift_code in sorted(cell_map.items()):
         d = date(year, month_num, day)
         entries.append({
             "hierarchy_code": emp_code,
             "date": d.isoformat(),
-            "shift_code": code
+            "shift_code": shift_code,
         })
 
     if unk_colors_found:
