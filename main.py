@@ -20,6 +20,36 @@ try:
 except ImportError:
     pass
 
+try:
+    import ambulance_adapter
+except ImportError:
+    ambulance_adapter = None
+
+
+def _run_extraction(tmp_path: str, year: int, month: int, mode: str = "auto"):
+    """Run PDF extraction using the specified mode.
+
+    Modes:
+        pixel – original pixel-sampling extractor (extractor.py)
+        ocr   – Camelot + Tesseract OCR extractor (ambulance_adapter.py)
+        auto  – try OCR first, fall back to pixel on failure
+    """
+    if mode == "ocr":
+        if ambulance_adapter is None:
+            raise RuntimeError("ambulance_adapter not available (missing dependencies?)")
+        return ambulance_adapter.process_single_pdf(tmp_path, year, month)
+    elif mode == "pixel":
+        return extractor.process_single_pdf(tmp_path, year, month)
+    else:  # auto
+        if ambulance_adapter is not None:
+            try:
+                results = ambulance_adapter.process_single_pdf(tmp_path, year, month)
+                if results:
+                    return results
+            except Exception:
+                pass
+        return extractor.process_single_pdf(tmp_path, year, month)
+
 app = FastAPI(title="ASR Solver API")
 
 # ─── API Key Authentication ──────────────────────────────────
@@ -799,6 +829,44 @@ def _do_solve(target_year: int, target_month: int) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════
+# SOLVE-GEMINI endpoint — AI-powered schedule generation
+# ═══════════════════════════════════════════════════════════
+
+try:
+    from gemini_solver import solve_with_gemini as _gemini_solve
+    _gemini_available = True
+except ImportError:
+    _gemini_available = False
+
+
+@app.post("/solve-gemini", dependencies=[Depends(verify_api_key)])
+def run_gemini_solver(request: SolverRequest):
+    """Generate a schedule using Google Gemini 2.0 Flash."""
+    if not _gemini_available:
+        return {"status": "error", "message": "Module gemini_solver non disponible."}
+
+    global _last_run
+    _last_run = {"status": "running", "message": f"Gemini AI solving {request.month}/{request.year}…",
+                 "started_at": datetime.now().isoformat()}
+    try:
+        result = _gemini_solve(
+            request.year, request.month,
+            supabase, load_config,
+        )
+        _last_run = {
+            "status": result["status"],
+            "message": result.get("message", "Done"),
+            "entries_saved": result.get("entries_saved", 0),
+            "finished_at": datetime.now().isoformat(),
+        }
+        return result
+    except Exception as exc:
+        _last_run = {"status": "error", "message": str(exc),
+                     "finished_at": datetime.now().isoformat()}
+        return {"status": "error", "message": str(exc)}
+
+
+# ═══════════════════════════════════════════════════════════
 # EXPLAIN endpoint
 # ═══════════════════════════════════════════════════════════
 
@@ -1378,7 +1446,7 @@ def _do_explain(target_year: int, target_month: int) -> dict:
 # ═══════════════════════════════════════════════════════════
 
 @app.post("/upload-pdf", dependencies=[Depends(verify_api_key)])
-async def upload_pdf(file: UploadFile = File(...), year: int = Form(...), month: int = Form(...)):
+async def upload_pdf(file: UploadFile = File(...), year: int = Form(...), month: int = Form(...), extractor_mode: str = Form("auto")):
     if not file.filename.endswith('.pdf'):
         return {"status": "error", "message": "Only PDF files are supported"}
 
@@ -1388,7 +1456,7 @@ async def upload_pdf(file: UploadFile = File(...), year: int = Form(...), month:
         tmp_path = tmp.name
 
     try:
-        entries = extractor.process_single_pdf(tmp_path, year, month)
+        entries = _run_extraction(tmp_path, year, month, extractor_mode)
     except Exception as e:
         os.unlink(tmp_path)
         return {"status": "error", "message": f"Extraction failed: {str(e)}"}
@@ -1506,9 +1574,9 @@ except Exception:
     KNOWN_SHIFT_CODES = {"AMNP", "AMJP", "AMHS", "R", "RS", "CMHN", "VA", "E", "FO9", "M", "ANP", "AP", "QC1", "C", "6FM", "6P1", "A2", "A1"}
 
 
-def _extract_and_validate(tmp_path: str, year: int, month: int, filename: str):
+def _extract_and_validate(tmp_path: str, year: int, month: int, filename: str, extractor_mode: str = "auto"):
     """Shared extraction + validation logic used by both validate and confirm flows."""
-    entries = extractor.process_single_pdf(tmp_path, year, month)
+    entries = _run_extraction(tmp_path, year, month, extractor_mode)
 
     # Resolve hierarchy_code to personnel_id
     personnel_res = supabase.table("personnel").select("id, hierarchy_code").execute()
@@ -1636,7 +1704,7 @@ def _extract_and_validate(tmp_path: str, year: int, month: int, filename: str):
 
 
 @app.post("/upload-pdf-validate", dependencies=[Depends(verify_api_key)])
-async def upload_pdf_validate(file: UploadFile = File(...), year: int = Form(...), month: int = Form(...)):
+async def upload_pdf_validate(file: UploadFile = File(...), year: int = Form(...), month: int = Form(...), extractor_mode: str = Form("auto")):
     """Step 1: Extract and validate only — no database writes."""
     if not file.filename.endswith('.pdf'):
         return {"status": "error", "message": "Only PDF files are supported"}
@@ -1647,7 +1715,7 @@ async def upload_pdf_validate(file: UploadFile = File(...), year: int = Form(...
         tmp_path = tmp.name
 
     try:
-        payload, summary, validation, _ = _extract_and_validate(tmp_path, year, month, file.filename)
+        payload, summary, validation, _ = _extract_and_validate(tmp_path, year, month, file.filename, extractor_mode)
     except Exception as e:
         os.unlink(tmp_path)
         return {"status": "error", "message": f"Extraction failed: {str(e)}"}

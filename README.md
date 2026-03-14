@@ -1,7 +1,9 @@
 # ASR Solver API
 
-API di ottimizzazione planning per **ASR** (Ambulances de la Sarine).  
+API di ottimizzazione planning per **ASR** (Ambulances de la Sarine, Sécurité Riviera – C6).  
 Genera automaticamente la migliore assegnazione Jour / Nuit / VM rispettando vincoli contrattuali, equità e preferenze.
+
+> **Ultimo aggiornamento docs:** 2026-03-12
 
 ## Stack
 
@@ -35,6 +37,31 @@ X-API-Key: <valore-di-SOLVER_API_KEY>
 ```
 
 Se la variabile d'ambiente `SOLVER_API_KEY` non è impostata, tutti gli endpoint sono accessibili liberamente (modalità sviluppo).
+
+## Moduli
+
+| File | Descrizione |
+|------|-------------|
+| `main.py` | FastAPI app — endpoint solver, explain, clear, upload-pdf |
+| `extractor.py` | Estrazione planning da PDF: 3 priorità (text overlay → sun icon → pixel) |
+| `SHIFT_CODES_REFERENCE.md` | Documentazione completa dei codici shift, colori pixel, normalizzazione |
+| `requirements.txt` | Dipendenze Python |
+| `Dockerfile` / `Procfile` | Deploy Cloud Run |
+
+## Funzionalità Chiave
+
+### Estrazione PDF (extractor.py)
+- **Priorità 1 — Text overlay**: lettura diretta dei codici stampati sulle cellule (`6P1`, `AMJ1`, etc.)
+- **Priorità 2 — Icona soleil**: rilevazione raster per C/C1/VA tramite ratio pixel caldi + colore fond
+- **Priorità 3 — Pixel centrale**: classificazione nearest-neighbor vs 70+ colori noti
+- **Normalizzazione shift**: `AMJ1/AMJ2→AMJP`, `AMN1/AMN2→AMNP`, `AMHR→AMHS`, `RS5-10→RS`, `C1→QC1`, `ML→M`
+
+### Solver OR-Tools (main.py)
+- **50h LTr** — limite settimanale proporzionale al FTE, con sottrazione minuti importati
+- **Limite mensile** — 10400 min/mese × FTE × (1 + overshoot%), con budget residuo
+- **Copertura giornaliera** — requisiti adattivi (ridotti se import blocca dipendenti)
+- **Equità** — distribuzione equilibrata turni Jour/Nuit/Weekend
+- **Regola domenicale** — 2 su 4 dimanches liberi (dérogatoire SECO)
 
 ## Setup Locale
 
