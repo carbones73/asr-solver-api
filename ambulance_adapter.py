@@ -1,191 +1,187 @@
-"""
-Adapter for ambulance_extractor
-================================
-
-Wraps ambulance_extractor.py to expose the same interface as extractor.py:
-    process_single_pdf(pdf_path, year, month_num)  →  [{hierarchy_code, date, shift_code}, …]
-
-This allows the solver-api endpoints to switch between pixel-based and
-OCR-based extraction transparently.
-"""
-
 from __future__ import annotations
+"""
+Adapter: ambulance_extractor → solver-api flat entry format
+============================================================
+
+Bridges the Camelot+pdfplumber-based ambulance_extractor package
+(which returns Operatore/TurnoGiornaliero dataclasses) into the flat
+dict format expected by main.py and batch_upload.py:
+
+    [{"hierarchy_code": "03", "date": "2026-01-15", "shift_code": "D"}, …]
+
+This is a drop-in replacement for the old extractor.process_single_pdf().
+"""
 
 import logging
-from typing import Dict, List, Any
+import os
+import sys
+from typing import Dict, List
+from unicodedata import normalize as _uninorm
 
-from extractor import EMPLOYEES  # reuse the canonical employee registry
+# ── Ensure the ambulance_extractor package (sibling directory) is importable ──
+_project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
 
-import ambulance_extractor as amb
+from ambulance_extractor import AmbulancePDFExtractor  # noqa: E402
+from employees import EMPLOYEES  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
 
-# ── Reverse lookup: employee name → hierarchy code ────────────────────────
-_NAME_TO_CODE: Dict[str, str] = {}
-for _code, _info in EMPLOYEES.items():
-    _NAME_TO_CODE[_info["name"]] = _code
+# ── Build name → hierarchy_code lookup (case-insensitive, accent-normalised) ──
 
-# Normalised variants to handle OCR misreadings (accents, spacing, case)
-_NAME_TO_CODE_NORMALISED: Dict[str, str] = {}
-for _name, _code in _NAME_TO_CODE.items():
-    _NAME_TO_CODE_NORMALISED[_name.lower().strip()] = _code
+def _normalise(s: str) -> str:
+    """Lowercase, strip, NFC-normalise for accent-safe comparison."""
+    return _uninorm("NFC", s.strip().lower())
 
 
-# ── Shift code normalisation ─────────────────────────────────────────────
-# The ambulance extractor returns raw OCR codes (e.g. "AMJ1", "AMN2", "ML").
-# The solver expects normalised codes matching extractor.py conventions.
-_CODE_ALIASES: Dict[str, str] = {
+def _build_name_map() -> Dict[str, str]:
+    """Build multiple lookup keys for each employee.
+
+    Keys generated:
+    - full name as-is (normalised)
+    - "Last First" → code
+    - "First Last" → code
+    - last name only (if unique)
+    """
+    by_full: Dict[str, str] = {}
+    by_last: Dict[str, List[str]] = {}
+
+    for code, info in EMPLOYEES.items():
+        name = info["name"]
+        norm = _normalise(name)
+        by_full[norm] = code
+
+        parts = name.split()
+        if len(parts) >= 2:
+            # "Last First" → also store "First Last"
+            reversed_name = _normalise(" ".join(parts[1:]) + " " + parts[0])
+            by_full[reversed_name] = code
+
+            last = _normalise(parts[0])
+            by_last.setdefault(last, []).append(code)
+
+    # Add unique last-name lookups
+    for last, codes in by_last.items():
+        if len(codes) == 1:
+            by_full[last] = codes[0]
+
+    return by_full
+
+
+_NAME_MAP = _build_name_map()
+
+
+def _resolve_hierarchy_code(operator_name: str) -> str | None:
+    """Return hierarchy code for an operator name, or None if unknown."""
+    norm = _normalise(operator_name)
+    if norm in _NAME_MAP:
+        return _NAME_MAP[norm]
+
+    # Fuzzy: try matching by last name only (first word of the input)
+    parts = norm.split()
+    if parts:
+        last = parts[0]
+        if last in _NAME_MAP:
+            return _NAME_MAP[last]
+
+    return None
+
+
+# ── Shift code normalisation ─────────────────────────────────────────────────
+
+# The ambulance_extractor may produce codes that differ slightly from what the
+# solver-api expects. This mapping corrects the most common variations.
+# Normalisation table per SHIFT_CODES_REFERENCE.md
+# Maps raw PDF / extractor codes to the canonical codes used by the solver.
+_CODE_ALIASES = {
+    # Day variants → AMJP (same 06:30–18:40 shift)
+    "AMJ":  "AMJP",
     "AMJ1": "AMJP",
     "AMJ2": "AMJP",
+    # Night variants → AMNP (same 18:40–06:30 shift)
+    "AMN":  "AMNP",
     "AMN1": "AMNP",
     "AMN2": "AMNP",
+    # Special hour R → AMHS (same type)
     "AMHR": "AMHS",
-    "ML":   "M",
-    "C1":   "QC1",
-    "RS5":  "RS",
-    "RS6":  "RS",
-    "RS7":  "RS",
-    "RS8":  "RS",
-    "RS9":  "RS",
-    "RS10": "RS",
+    # Rapid Spécial numbered variants → RS
+    "RS5":  "RS",  "RS6":  "RS",  "RS7":  "RS",
+    "RS8":  "RS",  "RS9":  "RS",  "RS10": "RS",
+    # Absence aliases
+    "C1":   "QC1",   # Congé prioritaire
+    "ML":   "M",     # Maladie (alias court)
 }
 
 
-def _normalise_shift_code(code: str) -> str:
-    """Normalise a raw OCR shift code to the solver convention."""
+def _normalise_shift_code(raw: str) -> str:
+    """Normalise a shift code from the extractor to the solver-api convention."""
+    code = raw.strip().upper()
     return _CODE_ALIASES.get(code, code)
 
 
-def _resolve_name(name: str) -> str | None:
-    """Resolve an operator name to a hierarchy code.
+# ── Public API ────────────────────────────────────────────────────────────────
 
-    Tries exact match first, then normalised (case-insensitive, stripped).
-    Returns None if no match found.
+def process_single_pdf(pdf_path: str, year: int, month: int) -> List[dict]:
+    """Extract shift entries from an ASR planning PDF.
+
+    Uses the Camelot+pdfplumber ambulance_extractor package.
+
+    Returns a list of dicts identical to what the old extractor.py produced:
+        [{"hierarchy_code": "03", "date": "2026-01-15", "shift_code": "D"}, …]
     """
-    if name in _NAME_TO_CODE:
-        return _NAME_TO_CODE[name]
-    return _NAME_TO_CODE_NORMALISED.get(name.lower().strip())
+    extractor = AmbulancePDFExtractor(
+        file_pdf=pdf_path,
+        anno=year,
+        debug=False,
+    )
 
+    turni = extractor.estrai()
+    logger.info("ambulance_extractor returned %d turni", len(turni))
 
-def process_single_pdf(
-    pdf_path: str,
-    year: int,
-    month_num: int,
-) -> List[Dict[str, Any]]:
-    """Extract shift entries from an ambulance planning PDF.
+    entries: List[dict] = []
+    unresolved_names: set = set()
 
-    Uses the ambulance_extractor pipeline (Camelot + OCR + pHash) and
-    converts records to the solver-api format.
+    for turno in turni:
+        hierarchy_code = _resolve_hierarchy_code(turno.nome_operatore)
 
-    Parameters
-    ----------
-    pdf_path : str
-        Path to the PDF file.
-    year : int
-        Year of the planning period.
-    month_num : int
-        Month number (1–12).
+        if hierarchy_code is None:
+            unresolved_names.add(turno.nome_operatore)
+            continue
 
-    Returns
-    -------
-    list of dict
-        Each dict has keys ``hierarchy_code``, ``date``, ``shift_code``.
-    """
-    # 1. Render pages
-    pages = amb.extract_pages_pdf(pdf_path, dpi=200)
+        # Each TurnoGiornaliero can have multiple shift codes for the same day.
+        # We take the first meaningful one (the primary code).
+        codes = turno.codici_turno
+        if not codes:
+            continue
 
-    all_records: List[Dict[str, Any]] = []
+        shift_code = _normalise_shift_code(codes[0])
 
-    for page_idx, page_img in enumerate(pages):
-        # 2. Extract legend and schedule mapping
-        legend_map, schedule_map = amb.extract_legend_from_page(page_img)
+        entries.append({
+            "hierarchy_code": hierarchy_code,
+            "date": turno.data,           # already YYYY-MM-DD from extractor
+            "shift_code": shift_code,
+        })
 
-        # 3. Build raw assignments
-        raw_assignments = amb.build_assignments_for_page(
-            pdf_path=pdf_path,
-            page_idx=page_idx,
-            page_image=page_img,
-            legend_map=legend_map,
-            schedule_map=schedule_map,
-            year_hint=year,
+    if unresolved_names:
+        logger.warning(
+            "Could not resolve %d operator name(s) to hierarchy codes: %s",
+            len(unresolved_names),
+            sorted(unresolved_names),
         )
 
-        # 4. Convert each assignment to solver format
-        for a in raw_assignments:
-            name = a.get("nome_operatore", "")
-            hierarchy_code = _resolve_name(name)
-            if hierarchy_code is None:
-                logger.debug(
-                    "OCR extractor: skipping unknown operator %r (page %d)",
-                    name, page_idx + 1,
-                )
-                continue
+    # Deduplicate: keep last entry for each (hierarchy_code, date) pair
+    seen: Dict[tuple, int] = {}
+    for idx, e in enumerate(entries):
+        key = (e["hierarchy_code"], e["date"])
+        seen[key] = idx
 
-            entry_date = a.get("data")
-            if not entry_date:
-                continue
-
-            # Determine shift code from OCR-detected codes
-            # The ambulance extractor doesn't put codes directly in the
-            # assignment; instead icons are matched.  We derive the code
-            # from the icon meanings or from the schedule_map keys.
-            shift_code = _derive_shift_code(a, schedule_map)
-            if shift_code is None:
-                continue
-
-            shift_code = _normalise_shift_code(shift_code)
-
-            all_records.append({
-                "hierarchy_code": hierarchy_code,
-                "date": entry_date,
-                "shift_code": shift_code,
-            })
+    deduped = [entries[i] for i in sorted(seen.values())]
 
     logger.info(
-        "OCR extractor produced %d entries for %d/%d",
-        len(all_records), month_num, year,
+        "Adapter produced %d entries (%d raw, %d after dedup)",
+        len(deduped), len(entries), len(deduped),
     )
-    return all_records
 
-
-def _derive_shift_code(
-    assignment: Dict[str, Any],
-    schedule_map: Dict[str, tuple],
-) -> str | None:
-    """Derive the best shift code from an ambulance extractor assignment.
-
-    Priority:
-    1. If turno_inizio/turno_fine are set *and* appear in schedule_map → use
-       the corresponding key.
-    2. If significato_icone contains a recognisable label → map it.
-    3. Fall back to the first icon meaning.
-    """
-    start = assignment.get("turno_inizio")
-    end = assignment.get("turno_fine")
-
-    # If the ambulance extractor already resolved start/end times, reverse-
-    # lookup the code from schedule_map.
-    if start and end:
-        for code, (st, et) in schedule_map.items():
-            if st == start and et == end:
-                return code
-
-    # Try icon meanings
-    meanings = assignment.get("significato_icone", [])
-    for meaning in meanings:
-        # Icon labels from the legend often contain the code directly
-        # e.g. "AMJ1 | 23 C6 Jour 1 ; 0630-1840"
-        for known in schedule_map:
-            if known in meaning:
-                return known
-
-    # If we have any meaning at all, try to extract a shift code from it
-    if meanings:
-        import re
-        for meaning in meanings:
-            match = re.search(r'\b([A-Z]{1,5}\d{0,2})\b', meaning)
-            if match:
-                return match.group(1)
-
-    return None
+    return deduped

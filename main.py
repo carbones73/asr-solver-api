@@ -14,41 +14,18 @@ import uuid as uuid_mod
 import hashlib
 import time
 
-# We assume extractor.py is alongside this file
-try:
-    import extractor
-except ImportError:
-    pass
-
-try:
-    import ambulance_adapter
-except ImportError:
-    ambulance_adapter = None
+# Pixel-based extraction pipeline (color sampling + text overlays)
+import ambulance_adapter
+from employees import EMPLOYEES
 
 
-def _run_extraction(tmp_path: str, year: int, month: int, mode: str = "auto"):
-    """Run PDF extraction using the specified mode.
+def _run_extraction(tmp_path: str, year: int, month: int, mode: str = "pixel"):
+    """Run PDF extraction using the Camelot+pdfplumber pipeline.
 
-    Modes:
-        pixel – original pixel-sampling extractor (extractor.py)
-        ocr   – Camelot + Tesseract OCR extractor (ambulance_adapter.py)
-        auto  – try OCR first, fall back to pixel on failure
+    Uses ambulance_adapter (Camelot table parsing + OCR).
+    The `mode` parameter is kept for API compatibility.
     """
-    if mode == "ocr":
-        if ambulance_adapter is None:
-            raise RuntimeError("ambulance_adapter not available (missing dependencies?)")
-        return ambulance_adapter.process_single_pdf(tmp_path, year, month)
-    elif mode == "pixel":
-        return extractor.process_single_pdf(tmp_path, year, month)
-    else:  # auto
-        if ambulance_adapter is not None:
-            try:
-                results = ambulance_adapter.process_single_pdf(tmp_path, year, month)
-                if results:
-                    return results
-            except Exception:
-                pass
-        return extractor.process_single_pdf(tmp_path, year, month)
+    return ambulance_adapter.process_single_pdf(tmp_path, year, month)
 
 app = FastAPI(title="ASR Solver API")
 
@@ -1504,7 +1481,13 @@ async def upload_pdf(file: UploadFile = File(...), year: int = Form(...), month:
         .eq("source", "import")\
         .execute()
 
+    # Deduplicate: OCR may produce duplicate (personnel_id, entry_date) pairs
     if payload:
+        dedup = {}
+        for row in payload:
+            key = (row["personnel_id"], row["entry_date"])
+            dedup[key] = row
+        payload = list(dedup.values())
         supabase.table("schedule_entries").upsert(payload, on_conflict="personnel_id,entry_date").execute()
 
     entries_for_preview = [
@@ -1518,7 +1501,7 @@ async def upload_pdf(file: UploadFile = File(...), year: int = Form(...), month:
 
     # Employees without any extracted entries
     all_active_codes = [
-        code for code, info in extractor.EMPLOYEES.items()
+        code for code, info in EMPLOYEES.items()
         if info["type"] not in ("aux",) and info["fte"] > 0
     ]
     employees_without_entries = [c for c in all_active_codes if c not in by_employee]
@@ -1566,12 +1549,12 @@ async def upload_pdf(file: UploadFile = File(...), year: int = Form(...), month:
     }
 
 
-# ── Known shift codes from extractor ─────────────────────────────────────────
-KNOWN_SHIFT_CODES = set()
-try:
-    KNOWN_SHIFT_CODES = {c[3] for c in extractor.KNOWN_COLORS}
-except Exception:
-    KNOWN_SHIFT_CODES = {"AMNP", "AMJP", "AMHS", "R", "RS", "CMHN", "VA", "E", "FO9", "M", "ANP", "AP", "QC1", "C", "6FM", "6P1", "A2", "A1"}
+# ── Known shift codes ────────────────────────────────────────────────────────
+KNOWN_SHIFT_CODES = {
+    "AMNP", "AMJP", "AMHS", "R", "RS", "CMHN", "VA", "E",
+    "FO9", "M", "ANP", "AP", "QC1", "C", "6FM", "6P1",
+    "A2", "A1", "C1", "FO", "MA",
+}
 
 
 def _extract_and_validate(tmp_path: str, year: int, month: int, filename: str, extractor_mode: str = "auto"):
@@ -1634,7 +1617,7 @@ def _extract_and_validate(tmp_path: str, year: int, month: int, filename: str, e
     num_days = days_in_month.days
 
     all_active_codes = [
-        code for code, info in extractor.EMPLOYEES.items()
+        code for code, info in EMPLOYEES.items()
         if info["type"] not in ("aux",) and info["fte"] > 0
     ]
     employees_without_entries = [c for c in all_active_codes if c not in by_employee]

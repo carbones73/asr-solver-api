@@ -22,7 +22,7 @@ TEST_MONTH = 7  # July — no imported data expected
 SHIFT_GROSS_MIN: Dict[str, int] = {
     "AMJP": 730, "AMNP": 710, "AMHS": 600, "R": 730, "RS": 600,
     "A1": 480, "A2": 480, "6FM": 240, "6P1": 480, "CSP": 480, "AMBCE": 730,
-    "FO9": 480, "E": 480,
+    "FO9": 540, "E": 480,
 }
 
 # Shift codes that are incompatible after a night shift (11h rest)

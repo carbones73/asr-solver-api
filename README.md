@@ -3,7 +3,7 @@
 API di ottimizzazione planning per **ASR** (Ambulances de la Sarine, Sécurité Riviera – C6).  
 Genera automaticamente la migliore assegnazione Jour / Nuit / VM rispettando vincoli contrattuali, equità e preferenze.
 
-> **Ultimo aggiornamento docs:** 2026-03-12
+> **Ultimo aggiornamento docs:** 2026-03-15
 
 ## Stack
 
@@ -21,7 +21,8 @@ Genera automaticamente la migliore assegnazione Jour / Nuit / VM rispettando vin
 | `GET` | `/` | ✗ | Health check |
 | `GET` | `/status` | ✗ | Stato del servizio |
 | `GET` | `/config` | ✓ | Configurazione solver |
-| `POST` | `/solve` | ✓ | Esegue il solver per un mese |
+| `POST` | `/solve` | ✓ | Esegue il solver OR-Tools per un mese |
+| `POST` | `/solve-gemini` | ✓ | Esegue il solver Gemini AI per un mese |
 | `POST` | `/explain` | ✓ | Spiega le scelte del solver |
 | `POST` | `/clear` | ✓ | Cancella il planning di un mese |
 | `POST` | `/upload-pdf` | ✓ | Upload e parsing PDF planning |
@@ -42,11 +43,14 @@ Se la variabile d'ambiente `SOLVER_API_KEY` non è impostata, tutti gli endpoint
 
 | File | Descrizione |
 |------|-------------|
-| `main.py` | FastAPI app — endpoint solver, explain, clear, upload-pdf |
+| `main.py` | FastAPI app — 10 endpoint (solver OR-Tools, solver Gemini, explain, clear, upload-pdf) |
 | `extractor.py` | Estrazione planning da PDF: 3 priorità (text overlay → sun icon → pixel) |
+| `gemini_solver.py` | Solver alternativo basato su Google Gemini 2.0 Flash (prompt strutturato JSON) |
+| `batch_upload.py` | Upload batch di tutti i PDF di un semestre |
+| `employees.py` | Mapping colonne PDF → dipendenti Supabase |
 | `SHIFT_CODES_REFERENCE.md` | Documentazione completa dei codici shift, colori pixel, normalizzazione |
 | `requirements.txt` | Dipendenze Python |
-| `Dockerfile` / `Procfile` | Deploy Cloud Run |
+| `Dockerfile` | Deploy Cloud Run |
 
 ## Funzionalità Chiave
 
@@ -62,6 +66,12 @@ Se la variabile d'ambiente `SOLVER_API_KEY` non è impostata, tutti gli endpoint
 - **Copertura giornaliera** — requisiti adattivi (ridotti se import blocca dipendenti)
 - **Equità** — distribuzione equilibrata turni Jour/Nuit/Weekend
 - **Regola domenicale** — 2 su 4 dimanches liberi (dérogatoire SECO)
+
+### Solver Gemini AI (gemini_solver.py)
+- **Generazione AI** — prompt strutturato JSON con le stesse regole LTr/SECO
+- **Modello** — Google Gemini 2.0 Flash via google-generativeai SDK
+- **Validazione** — parsing e verifica output prima di salvare in Supabase
+- **Endpoint** — `POST /solve-gemini` con stessa interfaccia del solver OR-Tools
 
 ## Setup Locale
 

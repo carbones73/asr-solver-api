@@ -243,4 +243,4 @@ RJ → Responsable du jour
 
 ---
 
-*Mis à jour le 2026-03-12 – source : tous les PDF (déc25–jun26) + legende.pdf + captures d'écran utilisateur + analyse histogramme pixel + validation janvier2026.pdf (618 C1, 91 C détectés).*
+*Mis à jour le 2026-03-14 – source : tous les PDF (déc25–jun26) + legende.pdf + captures d'écran utilisateur + analyse histogramme pixel + validation janvier2026.pdf (618 C1, 91 C détectés).*
